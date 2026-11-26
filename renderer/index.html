@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob:">
+  <title>Neko Terminal</title>
+  <link rel="stylesheet" href="../node_modules/@xterm/xterm/css/xterm.css">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="titlebar">
+    <div id="title">neko</div>
+    <div id="winctl">
+      <button id="win-min" title="Minimieren"><svg viewBox="0 0 10 10"><path d="M1 5h8"/></svg></button>
+      <button id="win-max" title="Maximieren"><svg viewBox="0 0 10 10"><rect x="1.5" y="1.5" width="7" height="7" rx="1.2"/></svg></button>
+      <button id="win-close" title="Schließen"><svg viewBox="0 0 10 10"><path d="M2 2l6 6M8 2l-6 6"/></svg></button>
+    </div>
+  </div>
+  <div id="workspace"></div>
+  <div id="tabbar">
+    <div id="tabs"></div>
+    <div id="newtab" title="Neuer Tab (Ctrl+Shift+T)">+</div>
+    <div id="status"></div>
+  </div>
+
+  <div id="searchbar" class="hidden">
+    <input id="search-input" spellcheck="false" placeholder="Suchen…">
+    <span id="search-info"></span>
+    <button id="search-prev" title="Vorheriger (Shift+Enter)">↑</button>
+    <button id="search-next" title="Nächster (Enter)">↓</button>
+    <button id="search-close" title="Schließen (Esc)">✕</button>
+  </div>
+
+  <div id="palette-backdrop" class="hidden">
+    <div id="palette">
+      <input id="palette-input" spellcheck="false" placeholder="Befehl eingeben…">
+      <div id="palette-list"></div>
+    </div>
+  </div>
+
+  <div id="toast" class="hidden"></div>
+  <div id="popups"></div>
+  <div id="lightbox" class="hidden"></div>
+  <div id="drop-hint" class="hidden"><div>Dateien loslassen, um den Pfad einzufügen</div></div>
+
+  <div class="rz n" data-edge="n"></div><div class="rz s" data-edge="s"></div>
+  <div class="rz e" data-edge="e"></div><div class="rz w" data-edge="w"></div>
+  <div class="rz ne" data-edge="ne"></div><div class="rz nw" data-edge="nw"></div>
+  <div class="rz se" data-edge="se"></div><div class="rz sw" data-edge="sw"></div>
+
+  <script src="../node_modules/@xterm/xterm/lib/xterm.js"></script>
+  <script src="../node_modules/@xterm/addon-fit/lib/addon-fit.js"></script>
+  <script src="../node_modules/@xterm/addon-webgl/lib/addon-webgl.js"></script>
+  <script src="../node_modules/@xterm/addon-unicode11/lib/addon-unicode11.js"></script>
+  <script src="../node_modules/@xterm/addon-search/lib/addon-search.js"></script>
+  <script src="../node_modules/@xterm/addon-image/lib/addon-image.js"></script>
+  <script src="themes.js"></script>
+  <script src="suggest.js"></script>
+  <script src="popups.js"></script>
+  <script src="links.js"></script>
+  <script src="renderer.js"></script>
+</body>
+</html>

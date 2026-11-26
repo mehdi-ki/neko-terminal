@@ -1,0 +1,58 @@
+{
+  "name": "neko-terminal",
+  "version": "1.1.0",
+  "description": "Kitty-style terminal for Windows",
+  "main": "bootstrap.js",
+  "scripts": {
+    "start": "electron .",
+    "predist": "node scripts/write-build-info.js",
+    "dist": "electron-builder --win portable"
+  },
+  "keywords": [],
+  "author": "Mehdi",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "@fontsource/jetbrains-mono": "^5.3.0",
+    "@lydell/node-pty": "^1.2.0-beta.18",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-image": "0.10.0-beta.1",
+    "@xterm/addon-search": "^0.16.0",
+    "@xterm/addon-unicode11": "^0.9.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/addon-webgl": "^0.19.0",
+    "@xterm/xterm": "^6.0.0"
+  },
+  "devDependencies": {
+    "electron": "^45.5.0",
+    "electron-builder": "^26.18.0"
+  },
+  "build": {
+    "appId": "local.neko.terminal",
+    "productName": "Neko Terminal",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "bootstrap.js",
+      "main.js",
+      "preload.js",
+      "build-info.json",
+      "cli/**",
+      "renderer/**",
+      "assets/**",
+      "node_modules/**",
+      "!node_modules/@fontsource/jetbrains-mono/files/!(jetbrains-mono-latin-*-normal.woff2)"
+    ],
+    "asarUnpack": [
+      "node_modules/@lydell/**"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "assets/icon.png"
+    },
+    "portable": {
+      "artifactName": "NekoTerminal.exe"
+    }
+  }
+}
