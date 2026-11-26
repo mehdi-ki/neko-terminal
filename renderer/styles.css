@@ -381,6 +381,10 @@ body { transition: background-color .35s ease; }
   border-radius: 14px; padding: 10px 12px; box-shadow: 0 8px 26px rgba(0,0,0,.3);
   animation: cc-in .16s ease-out;
 }
+/* no input box of its own: Claude's prompt in the terminal is the input. The menu floats above the
+   status bar instead of growing the dock, so the terminal never changes size while Claude runs. */
+.cc-box, .cc-slash { display: none !important; }
+.cc-menu { position: absolute; left: 0; right: 0; bottom: calc(100% + 6px); }
 @keyframes cc-in { from { opacity: 0; transform: translateY(6px); } }
 .cc-menu-title { font-size: 13px; margin-bottom: 8px; display: flex; gap: 8px; align-items: baseline; line-height: 1.4; }
 .cc-menu-ic { color: var(--accent); flex: none; }

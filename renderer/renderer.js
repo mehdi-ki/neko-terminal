@@ -185,6 +185,9 @@
       });
       this.term.parser.registerOscHandler(133, data => {
         if (data.startsWith('A')) {
+          this.hasPromptMarks = true;
+          // the shell prompt is back: Claude Code has ended in this pane
+          if (this.isClaude) this.setClaude(false);
           this.promptPending = true;
           this.clearInput();
         }
@@ -218,7 +221,11 @@
         this.title = t;
         // Claude Code sets titles like "✳ Claude Code" or "✳ <task>"
         const claude = /claude/i.test(t) || /^✳\s/.test(t) || C.BUSY_TITLE.test(t);
-        if (claude !== this.isClaude) this.setClaude(claude);
+        // Claude's task titles change while it works; switching the mode off resizes the terminal and
+        // makes Claude redraw (torn, doubled lines). So it stays on until the shell prompt comes back
+        // (OSC 133;A); only shells without prompt marks fall back to the title.
+        if (claude && !this.isClaude) this.setClaude(true);
+        else if (!claude && this.isClaude && !this.hasPromptMarks) this.setClaude(false);
         this.cm.onTitle(t);
         this.tab.render();
       });
@@ -267,7 +274,7 @@
         $('#drop-hint').classList.add('hidden');
         const paths = [...(e.dataTransfer ? e.dataTransfer.files : [])].map(f => window.neko.pathForFile(f)).filter(Boolean);
         if (!paths.length) return;
-        if (this.cm.on && !this.cm.menu) { this.tab.setFocused(this, false); this.cm.addPaths(paths); return; }
+        if (this.cm.on && !this.cm.menu && !this.cm.termMode) { this.tab.setFocused(this, false); this.cm.addPaths(paths); return; }
         this.tab.setFocused(this);
         this.term.paste(paths.map(p => this.quotePath(p)).join(' ') + ' ');
         this.term.focus();

@@ -6,7 +6,7 @@
   const KEY = { up: '\x1b[A', down: '\x1b[B', enter: '\r', esc: '\x1b', shiftTab: '\x1b[Z', ctrlC: '\x03' };
   const IMG_RE = /\.(png|jpe?g|gif|webp|bmp)$/i;
   // the window title while Claude works starts with a spinner glyph, "✳" when idle
-  const BUSY_TITLE = /^[✶✻✽✢·*⠁-⣿]\s/;
+  const BUSY_TITLE = /^[✶✻✽✢·*⠁-⣿◐◑◒◓]\s/;
 
   const BUILTIN = [
     ['clear', 'Unterhaltung leeren und neu anfangen'],
@@ -71,7 +71,8 @@
       this.histIdx = -1;
       this.draft = '';
       this.autoTerm = false;   // focus went to the terminal because a menu opened
-      this.termMode = false;   // the user chose to type into the terminal directly
+      // no input box of our own: typing always goes straight to Claude's own prompt in the terminal
+      this.termMode = true;
       this.slash = null;       // { items, sel }
       this.commands = null;
       this.build();
@@ -126,7 +127,7 @@
       this.sendBtn.onclick = () => { if (this.showStop()) this.write(KEY.esc); else this.send(); this.refocus(); };
       for (const b of el.querySelectorAll('.cc-quick button')) b.onclick = () => this.quick(b);
       // clicks on empty parts of the dock focus the input
-      el.addEventListener('mousedown', e => { if (!e.target.closest('button,textarea,.cc-slash,.cc-menu')) { e.preventDefault(); this.ta.focus(); } });
+      el.addEventListener('mousedown', e => { if (!e.target.closest('button,.cc-menu')) { e.preventDefault(); this.pane.term.focus(); } });
       new ResizeObserver(() => this.ctx.relayout(this.pane)).observe(el);
       this.restoreDraft();
       this.render();
@@ -152,7 +153,7 @@
     height() { return this.on ? this.el.offsetHeight : 0; }
 
     focus(insert) {
-      if (!this.on) return this.pane.term.focus();
+      if (!this.on || this.termMode) return this.pane.term.focus();
       if (this.menu) { this.pane.term.focus(); return; }
       this.ta.focus();
       if (insert) {
@@ -161,7 +162,7 @@
         this.ta.dispatchEvent(new Event('input'));
       }
     }
-    refocus() { if (!this.menu) this.ta.focus(); else this.pane.term.focus(); }
+    refocus() { this.pane.term.focus(); }
     hasFocus() { return document.activeElement === this.ta; }
 
     write(d) { if (this.pane.id) window.neko.pty.write(this.pane.id, d); }
@@ -447,7 +448,7 @@
         if (had && this.st.waiting) { this.st.waiting = null; this.render(); }
         if (had && this.autoTerm) {
           this.autoTerm = false;
-          if (this.pane.tab.focused === this.pane && document.activeElement === this.pane.term.textarea) this.ta.focus();
+          if (!this.termMode && this.pane.tab.focused === this.pane && document.activeElement === this.pane.term.textarea) this.ta.focus();
         }
       }
       this.el.classList.toggle('menu-open', !!menu);

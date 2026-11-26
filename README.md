@@ -6,7 +6,7 @@
 
 **A kitty-style terminal for Windows, macOS and Linux, built to work well with [Claude Code](https://claude.com/claude-code).**
 
-Tiling layouts, inline images, popups, clickable paths, and a Claude mode that turns Claude Code's text UI into real buttons and an input box.
+Tiling layouts, inline images, popups, clickable paths, and a Claude mode that turns Claude Code's menus into real buttons.
 
 [**Download**](https://github.com/mehdi-ki/neko-terminal/releases/latest) · [Features](#features) · [Claude Code](#claude-mode) · [The `neko` command](#the-neko-command) · [Build from source](#build-from-source)
 
@@ -32,13 +32,12 @@ Tiling layouts, inline images, popups, clickable paths, and a Claude mode that t
 
 Start `claude` in a Neko pane and Neko switches into Claude mode:
 
-- an app-like **input box** (multi-line, history, file picker) that types into Claude Code for you
 - Claude's menus (permission prompts, `/model`, trust dialogs …) appear as **clickable buttons**
 - a **status bar** with the model, how full the context is and what Claude is doing right now
 - quick buttons for common commands (new chat, compact, model, resume, context)
 - a **desktop notification** when Claude finishes or needs you while you are in another window
 
-![Claude mode with input box, model and context bar](docs/screenshots/claude-mode.png)
+![Claude mode with status bar, model and context](docs/screenshots/claude-mode.png)
 
 ![Claude's menus as buttons, and a popup sent with neko popup](docs/screenshots/claude-menus-and-popups.png)
 
