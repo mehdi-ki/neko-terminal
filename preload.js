@@ -24,6 +24,7 @@ ipcRenderer.on('ui:request', async (_e, reqId, payload) => {
 });
 
 contextBridge.exposeInMainWorld('neko', {
+  platform: process.platform,
   pty: {
     create: opts => ipcRenderer.invoke('pty:create', opts),
     write: (id, data) => ipcRenderer.send('pty:write', id, data),

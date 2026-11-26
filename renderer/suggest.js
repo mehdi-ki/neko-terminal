@@ -85,7 +85,7 @@
     const isSubPos = toks.length === 2 && SUBCOMMANDS[first] && !looksPath;
     if (!isSubPos && !last.text.startsWith('-') && (toks.length >= 2 || looksPath)) {
       try {
-        const style = ctx.shell === 'bash' || ctx.shell === 'wsl' ? 'posix' : 'win';
+        const style = window.neko.platform !== 'win32' || ctx.shell === 'bash' || ctx.shell === 'wsl' ? 'posix' : 'win';
         let entries = await window.neko.completePath(ctx.cwd, last.text, style);
         if (DIR_ONLY.has(first)) entries = entries.filter(e => e.isDir);
         else if (!PATH_HINT_CMDS.has(first) && !looksPath && !last.text) entries = entries.slice(0, 6);

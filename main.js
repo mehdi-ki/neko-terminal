@@ -19,7 +19,10 @@ const CLI_PATH = path.join(BIN_DIR, 'neko-cli.js');
 const SESSION_PATH = path.join(USER_DIR, 'session-restore.json');
 const CLIP_DIR = path.join(USER_DIR, 'clipboard');
 const CLAUDE_SETTINGS_PATH = path.join(USER_DIR, 'claude-settings.json');
-const PIPE_PATH = `\\\\.\\pipe\\neko-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+const IS_WIN = process.platform === 'win32';
+// side channel for the "neko" command: a named pipe on Windows, a unix socket elsewhere
+const PIPE_ID = `neko-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
+const PIPE_PATH = IS_WIN ? `\\\\.\\pipe\\${PIPE_ID}` : path.join(os.tmpdir(), `${PIPE_ID}.sock`);
 const BOOT = global.NEKO_BOOT || { root: __dirname, bundled: __dirname, fromSource: false };
 const APP_ROOT = __dirname; // folder this main.js was loaded from (source folder or the exe's app.asar)
 const fileHash = p => { try { return crypto.createHash('sha1').update(fs.readFileSync(p)).digest('hex'); } catch { return ''; } };
@@ -31,7 +34,8 @@ const DEFAULT_CONFIG = {
   font_size: 14,
   line_height: 1.15,
   theme: 'Tokyo Night',
-  shell: 'powershell',
+  // powershell | pwsh | cmd | bash | wsl on Windows, zsh | bash | fish | sh elsewhere ("" = login shell)
+  shell: IS_WIN ? 'powershell' : '',
   window_padding: 10,
   cursor_shape: 'bar',
   background_opacity: 0.82,
@@ -42,7 +46,7 @@ const DEFAULT_CONFIG = {
   inactive_pane_dim: 0.6,
   // folder with the Neko source code; "neko update" loads new code from here (empty = folder the exe was built from)
   source_dir: '',
-  // Windows notification when a program rings the bell while the window is in the background (Claude Code waiting)
+  // desktop notification when a program rings the bell while the window is in the background (Claude Code waiting)
   notify_on_bell: true,
   // underline links and file paths permanently (not only on hover)
   link_underline: true,
@@ -88,7 +92,24 @@ function findOnPath(exe) {
   return null;
 }
 
+const UNIX_SHELLS = [
+  { id: 'zsh', name: 'zsh' }, { id: 'bash', name: 'bash' }, { id: 'fish', name: 'fish' }, { id: 'sh', name: 'sh' },
+];
+function unixShells() {
+  const list = [];
+  const login = process.env.SHELL && fs.existsSync(process.env.SHELL) ? process.env.SHELL : '';
+  const loginId = login ? path.basename(login) : '';
+  for (const s of UNIX_SHELLS) {
+    const file = loginId === s.id ? login : ['/bin/', '/usr/bin/', '/usr/local/bin/', '/opt/homebrew/bin/'].map(d => d + s.id).find(f => fs.existsSync(f));
+    if (file) list.push({ id: s.id, name: s.name, file });
+  }
+  // the login shell first: it is the default
+  list.sort((a, b) => (b.id === loginId) - (a.id === loginId));
+  return list;
+}
+
 function availableShells() {
+  if (!IS_WIN) return unixShells();
   const list = [];
   const pwsh = findOnPath('pwsh.exe');
   if (pwsh) list.push({ id: 'pwsh', name: 'PowerShell 7', file: pwsh });
@@ -157,9 +178,36 @@ function global:claude {
 Clear-Host
 `;
 
+// bash / zsh outside Windows: prompt marks (OSC 133), current folder (OSC 7) and the claude function,
+// loaded after the user's own rc files
+const POSIX_CLAUDE_FN = String.raw`
+claude() {
+  case "$1" in
+    mcp|config|doctor|update|upgrade|install|setup-token|migrate-installer|plugin|plugins|auth|agents|-v|--version|-h|--help) command claude "$@" ;;
+    *) if [ -n "$NEKO_CLAUDE_SETTINGS" ] && [ -f "$NEKO_CLAUDE_SETTINGS" ]; then command claude --settings "$NEKO_CLAUDE_SETTINGS" "$@"; else command claude "$@"; fi ;;
+  esac
+}
+`;
+const BASH_INIT = String.raw`
+[ -f /etc/profile ] && . /etc/profile
+for __neko_f in ~/.bash_profile ~/.bash_login ~/.profile; do [ -f "$__neko_f" ] && { . "$__neko_f"; break; }; done
+[ -f ~/.bashrc ] && . ~/.bashrc
+unset __neko_f
+__neko_prompt() { printf '\033]133;A\007\033]7;file://%s%s\007' "$HOSTNAME" "$PWD"; }
+` + 'PROMPT_COMMAND="__neko_prompt${PROMPT_COMMAND:+;$PROMPT_COMMAND}"\n' + POSIX_CLAUDE_FN;
+const ZSH_INIT = String.raw`
+ZDOTDIR="$NEKO_USER_ZDOTDIR"
+[ -f "$ZDOTDIR/.zshenv" ] && . "$ZDOTDIR/.zshenv"
+[ -f "$ZDOTDIR/.zprofile" ] && . "$ZDOTDIR/.zprofile"
+[ -f "$ZDOTDIR/.zshrc" ] && . "$ZDOTDIR/.zshrc"
+__neko_prompt() { printf '\033]133;A\007\033]7;file://%s%s\007' "$HOST" "$PWD"; }
+autoload -Uz add-zsh-hook 2>/dev/null && add-zsh-hook precmd __neko_prompt
+` + POSIX_CLAUDE_FN;
+const SHELL_DIR = path.join(USER_DIR, 'shell');
+
 function shellLaunch(shellId, cwd, paneId) {
   const shells = availableShells();
-  const sh = shells.find(s => s.id === shellId) || shells.find(s => s.id === 'powershell');
+  const sh = shells.find(s => s.id === shellId) || (IS_WIN ? shells.find(s => s.id === 'powershell') : shells[0]) || { id: 'sh', name: 'sh', file: '/bin/sh' };
   const env = { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor', TERM_PROGRAM: 'neko', TERM_PROGRAM_VERSION: VERSION };
   // side channel for the "neko" command (images, popups, notifications, update)
   env.NEKO_PIPE = PIPE_PATH;
@@ -178,6 +226,21 @@ function shellLaunch(shellId, cwd, paneId) {
   if (sh.id === 'powershell' || sh.id === 'pwsh') {
     fs.writeFileSync(PS_INIT_PATH, '\ufeff' + PS_INIT, 'utf8');
     args = ['-NoLogo', '-NoExit', '-ExecutionPolicy', 'Bypass', '-Command', `. '${PS_INIT_PATH.replace(/'/g, "''")}'`];
+  } else if (!IS_WIN && sh.id === 'bash') {
+    fs.mkdirSync(SHELL_DIR, { recursive: true });
+    const rc = path.join(SHELL_DIR, 'bashrc');
+    fs.writeFileSync(rc, BASH_INIT);
+    args = ['--rcfile', rc, '-i'];
+  } else if (!IS_WIN && sh.id === 'zsh') {
+    // zsh reads its rc files from ZDOTDIR: ours sources the user's and adds Neko's hooks
+    const zdir = path.join(SHELL_DIR, 'zsh');
+    fs.mkdirSync(zdir, { recursive: true });
+    fs.writeFileSync(path.join(zdir, '.zshrc'), ZSH_INIT);
+    env.NEKO_USER_ZDOTDIR = process.env.ZDOTDIR || os.homedir();
+    env.ZDOTDIR = zdir;
+    args = ['-l'];
+  } else if (!IS_WIN) {
+    args = ['-l'];
   } else if (sh.id === 'bash') {
     args = ['--login', '-i'];
     env.CHERE_INVOKING = '1';
@@ -207,10 +270,10 @@ function createPty(win, { cols, rows, shellId, cwd }) {
     rows: Math.max(2, rows | 0),
     cwd: startDir,
     env: launch.env,
-    useConpty: true,
+    useConpty: IS_WIN,
     // bundled OpenConsole (same as Windows Terminal) instead of the old inbox conhost of Windows 10,
     // whose cursor tracking drifts with TUI apps like Claude Code
-    useConptyDll: true,
+    useConptyDll: IS_WIN,
   });
   const rec = { p, win, shell: launch.id, shellName: launch.name, cwd: startDir, ring: '', total: 0, buf: '', timer: null };
   ptys.set(id, rec);
@@ -262,6 +325,9 @@ function loadHistory() {
     try { lines = fs.readFileSync(psHist, 'utf8').split(/\r?\n/); } catch {}
     const bashHist = path.join(os.homedir(), '.bash_history');
     try { lines = lines.concat(fs.readFileSync(bashHist, 'utf8').split(/\r?\n/)); } catch {}
+    // zsh extended history: ": 1700000000:0;command"
+    const zshHist = path.join(os.homedir(), '.zsh_history');
+    try { lines = lines.concat(fs.readFileSync(zshHist, 'utf8').split(/\r?\n/).map(l => l.replace(/^: \d+:\d+;/, ''))); } catch {}
     lines = lines.filter(l => l.trim() && !l.endsWith('`')).slice(-5000);
     try { fs.mkdirSync(USER_DIR, { recursive: true }); fs.writeFileSync(HISTORY_PATH, lines.join('\n') + '\n'); } catch {}
   }
@@ -280,6 +346,7 @@ function scanPathCommands() {
     let entries = [];
     try { entries = fs.readdirSync(dir); } catch { continue; }
     for (const f of entries) {
+      if (!IS_WIN) { if (!f.startsWith('.')) out.add(f); continue; }
       const ext = path.extname(f).toLowerCase();
       if (EXEC_EXT.has(ext)) out.add(f.slice(0, -ext.length));
     }
@@ -292,6 +359,7 @@ function getCommands() {
   let cached = [];
   try { cached = JSON.parse(fs.readFileSync(CMD_CACHE_PATH, 'utf8')); } catch {}
   commandCache = [...new Set([...cached, ...scanPathCommands()])];
+  if (!IS_WIN) return commandCache;
   // refresh PowerShell command names in the background (cmdlets, functions, aliases)
   const ps = spawnChild('powershell.exe', ['-NoProfile', '-NoLogo', '-Command',
     'Get-Command -CommandType Cmdlet,Function,Alias -ErrorAction SilentlyContinue | ForEach-Object Name'], { windowsHide: true });
@@ -360,7 +428,9 @@ function installCli() {
   write(CLI_PATH, fs.readFileSync(path.join(APP_ROOT, 'cli', 'neko.js'), 'utf8'));
   write(path.join(BIN_DIR, 'neko.cmd'), '@echo off\r\nsetlocal\r\nset ELECTRON_RUN_AS_NODE=1\r\n"%NEKO_NODE%" "%NEKO_CLI%" %*\r\n');
   // Git Bash (also used by Claude Code's Bash tool)
-  write(path.join(BIN_DIR, 'neko'), '#!/bin/sh\nn="$NEKO_NODE"; c="$NEKO_CLI"\nif command -v cygpath >/dev/null 2>&1; then n="$(cygpath -u "$n")"; c="$(cygpath -w "$c")"; fi\nELECTRON_RUN_AS_NODE=1 exec "$n" "$c" "$@"\n');
+  const shim = path.join(BIN_DIR, 'neko');
+  write(shim, '#!/bin/sh\nn="$NEKO_NODE"; c="$NEKO_CLI"\nif command -v cygpath >/dev/null 2>&1; then n="$(cygpath -u "$n")"; c="$(cygpath -w "$c")"; fi\nELECTRON_RUN_AS_NODE=1 exec "$n" "$c" "$@"\n');
+  if (!IS_WIN) { try { fs.chmodSync(shim, 0o755); } catch {} }
 }
 
 // ---------------------------------------------------------------- Claude Code integration
@@ -589,6 +659,7 @@ async function loadImage(src, cwd) {
 }
 
 function findEditor() {
+  if (!IS_WIN) return findOnPath('code') || findOnPath('cursor') || null;
   return findOnPath('code.cmd') || findOnPath('cursor.cmd') || null;
 }
 // open a URL, file or folder; "file.js:12:3" jumps to the line when VS Code is installed
@@ -603,7 +674,8 @@ async function openTarget(target, cwd, { reveal = false } = {}) {
   if (reveal) { shell.showItemInFolder(p); return { ok: true }; }
   const editor = line && fs.statSync(p).isFile() ? findEditor() : null;
   if (editor) {
-    spawnChild('cmd.exe', ['/c', editor, '-g', `${p}:${line}${col ? ':' + col : ''}`], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
+    const [cmd, pre] = IS_WIN ? ['cmd.exe', ['/c', editor]] : [editor, []];
+    spawnChild(cmd, [...pre, '-g', `${p}:${line}${col ? ':' + col : ''}`], { windowsHide: true, detached: true, stdio: 'ignore' }).unref();
     return { ok: true };
   }
   const err = await shell.openPath(p);
@@ -682,6 +754,10 @@ function startPipeServer() {
     sock.on('error', () => {});
   });
   server.on('error', e => console.error('[neko] pipe:', e));
+  if (!IS_WIN) {
+    try { fs.unlinkSync(PIPE_PATH); } catch {}
+    app.on('will-quit', () => { try { fs.unlinkSync(PIPE_PATH); } catch {} });
+  }
   server.listen(PIPE_PATH);
 }
 
@@ -703,7 +779,7 @@ function gitPull(root) {
 
 async function runUpdate({ restart = false, pull = true } = {}) {
   if (APP_ROOT.includes('app.asar')) {
-    return { error: 'Neko läuft aus der exe ohne Quellordner. Setze "source_dir" in neko.json (oder baue die exe einmal mit "npm run dist" neu).' };
+    return { error: 'Neko läuft ohne Quellordner (Release-Build). Neue Versionen: https://github.com/mehdi-ki/neko-terminal/releases – oder Repo klonen und "source_dir" in neko.json setzen.' };
   }
   const log = [];
   if (pull) { const g = await gitPull(APP_ROOT); if (g) log.push(`git pull: ${g.out || 'ok'}`); }
@@ -721,7 +797,8 @@ async function runUpdate({ restart = false, pull = true } = {}) {
     setTimeout(() => {
       // start the new instance ourselves (app.relaunch() did not come back reliably on Windows)
       // the portable exe wrapper is only ours when we are packaged (a dev instance started from a Neko shell inherits it)
-      const execPath = (app.isPackaged && process.env.PORTABLE_EXECUTABLE_FILE) || process.execPath;
+      // (Linux AppImage: the .AppImage file itself, not the binary inside its temporary mount)
+      const execPath = (app.isPackaged && (process.env.PORTABLE_EXECUTABLE_FILE || process.env.APPIMAGE)) || process.execPath;
       const args = app.isPackaged ? [] : process.argv.slice(1).map(a => (a === '.' ? APP_ROOT : a));
       const env = { ...process.env };
       delete env.ELECTRON_RUN_AS_NODE;

@@ -16,6 +16,10 @@
   let config = null;
   let theme = null;
   let shells = [];
+  const IS_WIN = window.neko.platform === 'win32';
+  const IS_MAC = window.neko.platform === 'darwin';
+  // shells with / paths: everything outside Windows, Git Bash and WSL on Windows
+  const isPosixShell = id => !IS_WIN || id === 'bash' || id === 'wsl';
   const tabs = [];
   let activeTab = null;
   const workspace = $('#workspace');
@@ -100,7 +104,7 @@
       fontWeightBold: 'bold',
       smoothScrollDuration: 80,
       rightClickSelectsWord: false,
-      windowsPty: { backend: 'conpty', buildNumber: 19045 },
+      ...(IS_WIN ? { windowsPty: { backend: 'conpty', buildNumber: 19045 } } : {}),
       // OSC 8 hyperlinks (Claude Code and others print these)
       linkHandler: L.oscLinkHandler(() => (activeTab && activeTab.focused ? activeTab.focused.cwd : '')),
     };
@@ -171,8 +175,8 @@
         try {
           const u = new URL(data);
           let p = decodeURIComponent(u.pathname);
-          if (/^\/[a-zA-Z]:/.test(p)) p = p.slice(1);
-          this.cwd = p.replace(/\//g, this.shellId === 'bash' || this.shellId === 'wsl' ? '/' : '\\');
+          if (IS_WIN && /^\/[a-zA-Z]:/.test(p)) p = p.slice(1);
+          this.cwd = isPosixShell(this.shellId) ? p : p.replace(/\//g, '\\');
           if (this.shellId === 'wsl') this.cwd = '';
           if (this.id && this.cwd) window.neko.pty.setCwd(this.id, this.cwd);
         } catch {}
@@ -312,7 +316,7 @@
     }
 
     quotePath(p) {
-      if (this.shellId === 'bash' || this.shellId === 'wsl') {
+      if (isPosixShell(this.shellId)) {
         p = p.replace(/\\/g, '/');
         return /[\s'"()&;$]/.test(p) ? `'${p.replace(/'/g, "'\\''")}'` : p;
       }
@@ -602,11 +606,13 @@
       if (handleGlobalKey(e, this)) { e.preventDefault(); this._swallowNext = true; return false; }
 
       // clipboard (Windows-style in addition to kitty's ctrl+shift+c/v)
-      if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'c' && this.term.hasSelection()) {
+      // macOS: Cmd+C / Cmd+V
+      const copyMod = IS_MAC ? e.metaKey : e.ctrlKey;
+      if (copyMod && !e.shiftKey && !e.altKey && e.key === 'c' && this.term.hasSelection()) {
         window.neko.clipboard.write(this.term.getSelection()); this.term.clearSelection(); toast('Kopiert');
         e.preventDefault(); return false;
       }
-      if (e.ctrlKey && !e.shiftKey && !e.altKey && e.key === 'v') {
+      if (copyMod && !e.shiftKey && !e.altKey && e.key === 'v') {
         e.preventDefault();
         this.pasteClipboard();
         return false;
