@@ -11,6 +11,7 @@
   const S = window.NekoSuggest;
   const P = window.NekoPopups;
   const L = window.NekoLinks;
+  const C = window.NekoClaude;
 
   let config = null;
   let theme = null;
@@ -35,8 +36,21 @@
   }
   function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
 
-  function applyTheme() {
-    theme = window.NEKO_THEMES[config.theme] || window.NEKO_THEMES['Tokyo Night'];
+  const claudeUiOn = () => config.claude_ui !== false;
+  // panes running Claude Code get the Claude theme (config "claude_theme"), all others the normal one
+  function themeFor(isClaude) {
+    const T = window.NEKO_THEMES;
+    return (isClaude && claudeUiOn() && config.claude_theme && T[config.claude_theme]) || T[config.theme] || T['Tokyo Night'];
+  }
+  let appliedThemeKey = '';
+  function applyTheme(force) {
+    const p = activeTab && activeTab.focused;
+    const claude = !!(p && p.isClaude);
+    const key = `${claude}|${config.theme}|${config.claude_theme}|${config.claude_ui}|${config.background_opacity}|${config.font_family}|${config.window_padding}|${config.inactive_pane_dim}`;
+    if (!force && key === appliedThemeKey) return;
+    appliedThemeKey = key;
+    theme = themeFor(claude);
+    document.body.classList.toggle('claude-active', claude && claudeUiOn());
     const r = document.documentElement.style;
     const u = theme.ui;
     r.setProperty('--bg', theme.term.background);
@@ -67,7 +81,7 @@
     return `rgba(${n >> 16}, ${(n >> 8) & 255}, ${n & 255}, ${a})`;
   }
   // the terminal draws on a transparent canvas so the window background shows through
-  function termTheme() { return { ...theme.term, background: '#00000000' }; }
+  function termTheme(pane) { return { ...themeFor(!!(pane && pane.isClaude)).term, background: '#00000000' }; }
 
   function termOptions() {
     return {
@@ -150,6 +164,8 @@
         if (ImageAddon) this.term.loadAddon(new ImageAddon({ sixelSupport: true, iipSupport: true, enableSizeReports: true, pixelLimit: 16777216, storageLimit: 128, showPlaceholder: true }));
       } catch (e) { console.warn('image addon unavailable', e); }
       this.links = L.attach(this);
+      this.cm = C.create(this, claudeCtx);
+      this.term.onRender(() => { if (this.cm.on && !this._scanT) this._scanT = setTimeout(() => { this._scanT = null; this.cm.scan(); }, 90); });
 
       this.term.parser.registerOscHandler(7, data => {
         try {
@@ -197,15 +213,17 @@
       this.term.onTitleChange(t => {
         this.title = t;
         // Claude Code sets titles like "✳ Claude Code" or "✳ <task>"
-        const claude = /claude/i.test(t) || /^[✳✶✻✽✢·⠂⠐]\s/.test(t);
-        if (claude !== this.isClaude) { this.isClaude = claude; this.el.classList.toggle('claude', claude); }
+        const claude = /claude/i.test(t) || /^✳\s/.test(t) || C.BUSY_TITLE.test(t);
+        if (claude !== this.isClaude) this.setClaude(claude);
+        this.cm.onTitle(t);
         this.tab.render();
       });
       this.term.onBell(() => {
         this.el.classList.remove('bell'); void this.el.offsetWidth; this.el.classList.add('bell');
         if (this.tab !== activeTab) { this.tab.bell = true; renderTabs(); }
         // Claude Code rings the bell when it waits for you: tell Windows when Neko is in the background
-        if (config.notify_on_bell && !document.hasFocus()) {
+        // (with Neko's hooks the Claude mode sends its own, more precise message)
+        if (config.notify_on_bell && !document.hasFocus() && !(this.isClaude && this.cm.st.hooked)) {
           const now = Date.now();
           if (!this._lastBellNote || now - this._lastBellNote > 15000) {
             this._lastBellNote = now;
@@ -221,7 +239,10 @@
       this.term.onBinary(d => { if (!this.replaying && this.id) window.neko.pty.write(this.id, d); });
       this.term.onRender(() => { this.scheduleSync(); this.placeImages(); });
       this.term.onScroll(() => { this.scheduleSync(); this.placeImages(); });
-      this.term.onResize(({ cols, rows }) => { if (this.id) window.neko.pty.resize(this.id, cols, rows); });
+      this.term.onResize(({ cols, rows }) => {
+        if (this.id) window.neko.pty.resize(this.id, cols, rows);
+        if (this.tab === activeTab && this.tab.focused === this) updateChrome();
+      });
       this.term.attachCustomKeyEventHandler(e => this.onKey(e));
       this.term.textarea.addEventListener('focus', () => this.tab.setFocused(this));
 
@@ -242,6 +263,7 @@
         $('#drop-hint').classList.add('hidden');
         const paths = [...(e.dataTransfer ? e.dataTransfer.files : [])].map(f => window.neko.pathForFile(f)).filter(Boolean);
         if (!paths.length) return;
+        if (this.cm.on && !this.cm.menu) { this.tab.setFocused(this, false); this.cm.addPaths(paths); return; }
         this.tab.setFocused(this);
         this.term.paste(paths.map(p => this.quotePath(p)).join(' ') + ' ');
         this.term.focus();
@@ -277,7 +299,10 @@
         if (this.tab !== activeTab && !this.tab.activity) { this.tab.activity = true; renderTabs(); }
       });
       window.neko.pty.onExit(this.id, code => this.onExit(code));
+      this.cm.restoreDraft();
       if (att) {
+        // hot update: Claude's state lives in the main process
+        window.neko.claude.state(this.id).then(st => { if (st) this.cm.applyState(st); });
         // a resize makes ConPTY and TUI apps (Claude Code) repaint the screen cleanly
         const { cols, rows } = this.term;
         window.neko.pty.resize(this.id, cols, Math.max(2, rows - 1));
@@ -293,6 +318,26 @@
       }
       if (this.shellId === 'cmd' || this.isClaude) return /\s/.test(p) ? `"${p}"` : p;
       return /[\s'()&;$`{}]/.test(p) ? `'${p.replace(/'/g, "''")}'` : p;
+    }
+
+    // Claude Code started or ended in this pane
+    setClaude(on) {
+      this.isClaude = on;
+      this.el.classList.toggle('claude', on);
+      this.term.options.theme = termTheme(this);
+      this.cm.setActive(on && claudeUiOn());
+      if (this.tab === activeTab) applyTheme();
+      renderTabs();
+    }
+
+    // room for the Claude input box under the terminal
+    relayout() {
+      const h = this.cm.height();
+      if (h === this._ccH) return;
+      this._ccH = h;
+      this.host.style.bottom = h ? `calc(var(--pad) + ${h + 6}px)` : '';
+      clearTimeout(this._fitT);
+      this._fitT = setTimeout(() => { this.doFit(); this.placeImages(); }, 40);
     }
 
     notify({ title, body }) {
@@ -372,10 +417,14 @@
       try { this.fit.fit(); } catch {}
     }
 
-    focus() { this.term.focus(); }
+    focus() {
+      if (this.cm.on && !this.cm.termMode) this.cm.focus();
+      else this.term.focus();
+    }
 
     dispose() {
       L.hideTip();
+      this.cm.dispose();
       if (this.id) window.neko.pty.kill(this.id);
       this.id = null;
       try { this.term.dispose(); } catch {}
@@ -563,6 +612,14 @@
         return false;
       }
 
+      // Claude mode: typing while the terminal has focus goes to the input box (unless a menu is open
+      // or the user chose to type into the terminal directly)
+      if (this.cm.on && !this.cm.menu && !this.cm.termMode && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
+        e.preventDefault();
+        this.cm.focus(e.key);
+        return false;
+      }
+
       // autofill keys
       const vis = this.suggestVisible();
       if (e.ctrlKey && e.code === 'Space' && config.autosuggest) {
@@ -600,8 +657,11 @@
       this.layout = config.layouts[0] || 'tall';
       this.activity = false;
       this.bell = false;
+      this.done = false;   // Claude finished while you were in another tab
       this.customTitle = null;
     }
+
+    isActive() { return this === activeTab; }
 
     async addPane(opts = {}, after = null) {
       const p = new Pane(this, opts);
@@ -742,7 +802,7 @@
     if (activeTab && activeTab !== t) { activeTab.view.classList.remove('active'); activeTab.panes.forEach(p => p.hideSuggest()); }
     activeTab = t;
     t.view.classList.add('active');
-    t.activity = false; t.bell = false;
+    t.activity = false; t.bell = false; t.done = false;
     t.arrange();
     if (t.focused) t.focused.focus();
     updateChrome();
@@ -773,12 +833,15 @@
     box.innerHTML = '';
     tabs.forEach((t, i) => {
       const el = document.createElement('div');
-      el.className = 'tab' + (t === activeTab ? ' active' : '') + (t.activity ? ' has-activity' : '') + (t.bell ? ' has-bell' : '');
+      const cl = t.panes.filter(p => p.isClaude);
+      const waiting = cl.some(p => p.cm.waiting), busy = cl.some(p => p.cm.busy);
+      el.className = 'tab' + (t === activeTab ? ' active' : '') + (t.activity ? ' has-activity' : '') + (t.bell || waiting ? ' has-bell' : '') + (t.done ? ' has-done' : '');
       const count = t.panes.length > 1 ? `<span class="count">[${t.panes.length}]</span>` : '';
-      const claude = t.panes.some(p => p.isClaude) ? '<span class="claude" title="Claude Code">✳</span>' : '';
+      const claude = cl.length ? `<span class="claude${busy ? ' busy' : ''}${waiting ? ' wait' : ''}" title="${waiting ? 'Claude wartet auf dich' : busy ? 'Claude arbeitet' : 'Claude Code'}">✳</span>` : '';
       const pr = (t.panes.find(p => p.progress) || {}).progress;
       const prog = pr ? `<span class="prog ${pr.state}" title="${pr.value != null ? pr.value + ' %' : pr.state}">${pr.state === 'value' && pr.value != null ? `<i style="width:${pr.value}%"></i>` : '<i></i>'}</span>` : '';
-      el.innerHTML = `<span class="num">${i + 1}</span>${claude}<span class="name">${escapeHtml(t.title())}</span>${count}${prog}<span class="activity"></span>`;
+      const done = t.done && t !== activeTab ? '<span class="done" title="Claude ist fertig">✓</span>' : '';
+      el.innerHTML = `<span class="num">${i + 1}</span>${claude}<span class="name">${escapeHtml(t.title())}</span>${count}${prog}${done}<span class="activity"></span>`;
       el.title = t.focused ? (t.focused.cwd || t.focused.title) : '';
       el.onmousedown = e => {
         if (e.button === 1) { e.preventDefault(); closeTab(t); }
@@ -793,6 +856,7 @@
     const t = activeTab;
     if (!t) return;
     const p = t.focused;
+    applyTheme();
     const where = p ? (p.cwd || p.title || '') : '';
     $('#title').innerHTML = `${escapeHtml(p && p.shellName ? p.shellName : 'neko')} — <b>${escapeHtml(where)}</b>`;
     document.title = `${t.title()} — Neko`;
@@ -817,13 +881,34 @@
   }
 
   function applyConfigToAll() {
-    applyTheme();
+    applyTheme(true);
     const o = termOptions();
     for (const t of tabs) for (const p of t.panes) {
-      for (const k of ['fontFamily', 'fontSize', 'lineHeight', 'cursorStyle', 'cursorWidth', 'cursorBlink', 'cursorInactiveStyle', 'scrollback', 'theme']) p.term.options[k] = o[k];
+      for (const k of ['fontFamily', 'fontSize', 'lineHeight', 'cursorStyle', 'cursorWidth', 'cursorBlink', 'cursorInactiveStyle', 'scrollback']) p.term.options[k] = o[k];
+      p.term.options.theme = termTheme(p);
+      p.cm.setActive(p.isClaude && claudeUiOn());
     }
     for (const t of tabs) t.arrange();
   }
+
+  // ================================================================ Claude mode glue
+  const claudeCtx = {
+    globalKey: (e, pane) => handleGlobalKey(e, pane),
+    toast: msg => toast(msg),
+    relayout: pane => pane.relayout(),
+    changed: pane => { if (pane.tab) renderTabs(); },
+    // Claude is done or needs you: tab marker, and a message when you are looking elsewhere
+    alert(pane, kind, text) {
+      if (config.claude_notify === false) return;
+      const here = document.hasFocus() && pane.tab === activeTab;
+      if (here) return;
+      if (pane.tab !== activeTab) { if (kind === 'done') pane.tab.done = true; else pane.tab.bell = true; renderTabs(); }
+      const title = kind === 'done' ? 'Claude ist fertig' : 'Claude braucht dich';
+      const body = String(text || (kind === 'done' ? 'Die Antwort ist da.' : 'Claude wartet auf eine Entscheidung.')).replace(/\s+/g, ' ').slice(0, 180);
+      if (document.hasFocus()) P.card({ kind: 'notify', title, text: body, source: pane.tab.title(), claude: true, cwd: pane.cwd, onActivate: () => focusPane(pane) });
+      else window.neko.ui.notify({ title: `${title} — ${pane.tab.title()}`, body, paneId: pane.id, force: true });
+    },
+  };
 
   let opacitySaveT = null;
   function changeOpacity(d) {
@@ -976,6 +1061,9 @@
       { label: 'Schrift größer', keys: 'Ctrl+Shift+=', run: () => changeFontSize(1) },
       { label: 'Schrift kleiner', keys: 'Ctrl+Shift+-', run: () => changeFontSize(-1) },
       { label: 'Schriftgröße zurücksetzen', keys: 'Ctrl+Shift+⌫', run: () => changeFontSize(0) },
+      { label: `Claude-Oberfläche ${claudeUiOn() ? 'ausschalten' : 'einschalten'}`, run: async () => { config.claude_ui = !claudeUiOn(); await window.neko.config.set({ claude_ui: config.claude_ui }); applyConfigToAll(); toast(`Claude-Oberfläche ${config.claude_ui ? 'an' : 'aus'}`); } },
+      { label: `Claude-Farben ${config.claude_theme ? 'ausschalten' : 'einschalten'}`, run: async () => { config.claude_theme = config.claude_theme ? '' : 'Claude'; await window.neko.config.set({ claude_theme: config.claude_theme }); applyConfigToAll(); } },
+      { label: `Claude-Meldungen ${config.claude_notify === false ? 'einschalten' : 'ausschalten'}`, run: async () => { config.claude_notify = config.claude_notify === false; await window.neko.config.set({ claude_notify: config.claude_notify }); toast(`Claude-Meldungen ${config.claude_notify ? 'an' : 'aus'}`); } },
       { label: `Autofill ${config.autosuggest ? 'ausschalten' : 'einschalten'}`, run: async () => { config.autosuggest = !config.autosuggest; await window.neko.config.set({ autosuggest: config.autosuggest }); toast(`Autofill ${config.autosuggest ? 'an' : 'aus'}`); } },
       { label: 'Konfiguration öffnen (neko.json)', keys: 'Ctrl+Shift+F2', run: () => window.neko.config.open() },
       { label: 'Vollbild', keys: 'F11', run: () => window.neko.window.fullscreen() },
@@ -1111,6 +1199,8 @@
   }
   window.NekoConfig = () => config || {};
   window.NekoRefocus = () => { if (activeTab && activeTab.focused) activeTab.focused.focus(); };
+  // debug (NEKO_STEPS "eval"): the focused pane
+  window.__nekoPane = () => activeTab && activeTab.focused;
   // debug (NEKO_STEPS "dump"): text of the focused pane
   window.__nekoDump = () => {
     const p = activeTab && activeTab.focused;
@@ -1163,6 +1253,7 @@
     window.neko.config.onChange(c => { const base = config._baseFont; config = { ...c, _baseFont: c.font_size || base }; applyConfigToAll(); });
     window.neko.ui.onRequest(handleUiRequest);
     window.neko.ui.onFocusPane(id => focusPane(findPane(id)));
+    window.neko.claude.onEvent(ev => { const p = findPane(ev.paneId); if (p) p.cm.onHook(ev); });
     const { snapshot: snap, live } = await window.neko.session.restore();
     if (!(await restoreSession(snap, live || []))) await newTab({ cwd: '' });
     window.neko.app.info().then(i => { if (i.bootError) P.card({ kind: 'popup', title: 'Quellordner fehlerhaft', text: 'Neko läuft mit der Version aus der exe, weil main.js im Quellordner nicht geladen werden konnte:\n' + i.bootError.split('\n')[0] }); });

@@ -1,6 +1,6 @@
 // Neko Terminal - main process
 // Owns the window, the pseudo terminals (ConPTY via node-pty), config, history and completion data.
-const { app, BrowserWindow, ipcMain, shell, clipboard, screen, Notification, nativeImage, net: enet } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, clipboard, screen, Notification, nativeImage, dialog, net: enet } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -18,6 +18,7 @@ const BIN_DIR = path.join(USER_DIR, 'bin');
 const CLI_PATH = path.join(BIN_DIR, 'neko-cli.js');
 const SESSION_PATH = path.join(USER_DIR, 'session-restore.json');
 const CLIP_DIR = path.join(USER_DIR, 'clipboard');
+const CLAUDE_SETTINGS_PATH = path.join(USER_DIR, 'claude-settings.json');
 const PIPE_PATH = `\\\\.\\pipe\\neko-${process.pid}-${crypto.randomBytes(6).toString('hex')}`;
 const BOOT = global.NEKO_BOOT || { root: __dirname, bundled: __dirname, fromSource: false };
 const APP_ROOT = __dirname; // folder this main.js was loaded from (source folder or the exe's app.asar)
@@ -47,6 +48,12 @@ const DEFAULT_CONFIG = {
   link_underline: true,
   // inline images (neko img): max height in rows
   image_max_rows: 20,
+  // Claude mode: app-like input box, buttons and status while Claude Code runs in a pane
+  claude_ui: true,
+  // color theme while Claude Code runs ("" = keep the normal theme)
+  claude_theme: 'Claude',
+  // notify when Claude is done or needs you while you are elsewhere
+  claude_notify: true,
   layouts:['tall', 'fat', 'grid', 'horizontal', 'vertical', 'stack'],
 };
 
@@ -137,6 +144,16 @@ function global:prompt {
   $host.UI.RawUI.WindowTitle = Split-Path -Leaf $p
   "$osc$e[1;34m$env:USERNAME$e[0m $e[90min$e[0m $e[1;35m$disp$e[0m$git$admin$([char]10)$arrow "
 }
+# Claude Code in Neko: load Neko's hooks (busy / done / needs you) on top of the user's own settings
+function global:claude {
+  if (-not $global:__nekoClaudeExe) {
+    $global:__nekoClaudeExe = (Get-Command claude -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+  }
+  if (-not $global:__nekoClaudeExe) { Write-Error 'claude wurde nicht gefunden (ist Claude Code installiert?)'; return }
+  $sub = @('mcp', 'config', 'doctor', 'update', 'upgrade', 'install', 'setup-token', 'migrate-installer', 'plugin', 'plugins', 'auth', 'agents', '-v', '--version', '-h', '--help')
+  if (-not $env:NEKO_CLAUDE_SETTINGS -or -not (Test-Path -LiteralPath $env:NEKO_CLAUDE_SETTINGS) -or ($args.Count -gt 0 -and $sub -contains [string]$args[0])) { & $global:__nekoClaudeExe @args }
+  else { & $global:__nekoClaudeExe --settings $env:NEKO_CLAUDE_SETTINGS @args }
+}
 Clear-Host
 `;
 
@@ -149,7 +166,10 @@ function shellLaunch(shellId, cwd, paneId) {
   env.NEKO_PANE = String(paneId);
   env.NEKO_NODE = process.execPath;
   env.NEKO_CLI = CLI_PATH;
+  env.NEKO_CLAUDE_SETTINGS = CLAUDE_SETTINGS_PATH;
   delete env.ELECTRON_RUN_AS_NODE;
+  // a shell in Neko is a fresh start, even when Neko itself was started from inside Claude Code
+  for (const k of ['CLAUDECODE', 'CLAUDE_CODE_CHILD_SESSION', 'CLAUDE_CODE_ENTRYPOINT', 'CLAUDE_CODE_SSE_PORT']) delete env[k];
   // variables of the portable exe wrapper belong to Neko itself, not to programs started in it
   for (const k of Object.keys(env)) if (k.startsWith('PORTABLE_EXECUTABLE_')) delete env[k];
   const pathKey = Object.keys(env).find(k => k.toUpperCase() === 'PATH') || 'PATH';
@@ -215,6 +235,8 @@ function createPty(win, { cols, rows, shellId, cwd }) {
   p.onExit(({ exitCode }) => {
     flush();
     ptys.delete(id);
+    const cst = claudeStates.get(id);
+    if (cst) { if (cst.poll) clearInterval(cst.poll); claudeStates.delete(id); }
     setTimeout(() => { if (!rec.win.isDestroyed()) rec.win.webContents.send('pty:exit', id, exitCode); }, 10);
   });
   return { id, shell: launch.id, shellName: launch.name, cwd: startDir };
@@ -341,6 +363,198 @@ function installCli() {
   write(path.join(BIN_DIR, 'neko'), '#!/bin/sh\nn="$NEKO_NODE"; c="$NEKO_CLI"\nif command -v cygpath >/dev/null 2>&1; then n="$(cygpath -u "$n")"; c="$(cygpath -w "$c")"; fi\nELECTRON_RUN_AS_NODE=1 exec "$n" "$c" "$@"\n');
 }
 
+// ---------------------------------------------------------------- Claude Code integration
+// "claude" started from a Neko PowerShell loads CLAUDE_SETTINGS_PATH, whose hooks run "neko hook".
+// That reports session start, prompt submit, stop and notifications for the pane; the transcript
+// (JSONL) gives the model, the context size and what Claude is doing right now.
+function writeClaudeSettings() {
+  const hook = [{ hooks: [{ type: 'command', command: 'neko hook', timeout: 5 }] }];
+  const settings = { hooks: {} };
+  for (const ev of ['SessionStart', 'UserPromptSubmit', 'Stop', 'Notification', 'SessionEnd']) settings.hooks[ev] = hook;
+  try {
+    const s = JSON.stringify(settings, null, 2);
+    if (!fs.existsSync(CLAUDE_SETTINGS_PATH) || fs.readFileSync(CLAUDE_SETTINGS_PATH, 'utf8') !== s) fs.writeFileSync(CLAUDE_SETTINGS_PATH, s);
+  } catch (e) { console.error('[neko] claude settings:', e); }
+}
+
+const claudeStates = new Map(); // paneId -> state
+function claudeState(paneId) {
+  if (!claudeStates.has(paneId)) claudeStates.set(paneId, { hooked: false, active: false, busy: false, since: 0, waiting: null, model: '', ctx: 0, activity: '', lastText: '', transcript: '', cwd: '', poll: null, mtime: 0 });
+  return claudeStates.get(paneId);
+}
+function publicClaudeState(st) {
+  const { poll, mtime, newestId, waitingAt, interrupted, ...rest } = st;
+  return rest;
+}
+
+function readTail(file, max = 512 * 1024) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const start = Math.max(0, size - max);
+    const buf = Buffer.alloc(size - start);
+    fs.readSync(fd, buf, 0, buf.length, start);
+    const s = buf.toString('utf8');
+    return start ? s.slice(s.indexOf('\n') + 1) : s;
+  } finally { fs.closeSync(fd); }
+}
+
+function describeTool(t) {
+  const i = t.input || {};
+  const file = i.file_path || i.notebook_path || i.path;
+  const short = s => String(s).replace(/\s+/g, ' ').slice(0, 60);
+  switch (t.name) {
+    case 'Read': return `liest ${path.basename(file || '')}`;
+    case 'Edit': case 'MultiEdit': return `bearbeitet ${path.basename(file || '')}`;
+    case 'Write': return `schreibt ${path.basename(file || '')}`;
+    case 'Bash': case 'PowerShell': return `führt aus: ${short(i.description || i.command || '')}`;
+    case 'Grep': return `sucht „${short(i.pattern || '')}“`;
+    case 'Glob': return `sucht Dateien ${short(i.pattern || '')}`;
+    case 'WebSearch': return `sucht im Web: ${short(i.query || '')}`;
+    case 'WebFetch': return 'liest eine Webseite';
+    case 'Agent': case 'Task': return `Agent: ${short(i.description || '')}`;
+    case 'TodoWrite': return 'plant die Schritte';
+    default: return t.name ? `nutzt ${t.name.replace(/^mcp__[^_]+__/, '')}` : '';
+  }
+}
+
+// model, context tokens, last answer text and current activity from the end of the transcript
+function readTranscript(st) {
+  if (!st.transcript) return false;
+  let mtime = 0;
+  try { mtime = fs.statSync(st.transcript).mtimeMs; } catch { return false; }
+  if (mtime === st.mtime) return false;
+  st.mtime = mtime;
+  let lines;
+  try { lines = readTail(st.transcript).split('\n'); } catch { return false; }
+  let gotUsage = false, gotText = false, gotActivity = false, newest = true;
+  st.interrupted = false;
+  for (let i = lines.length - 1, n = 0; i >= 0 && n < 600 && !(gotUsage && gotText && gotActivity); i--, n++) {
+    if (!lines[i]) continue;
+    let o;
+    try { o = JSON.parse(lines[i]); } catch { continue; }
+    if (o.isSidechain) continue;
+    if (newest && (o.type === 'user' || o.type === 'assistant')) {
+      newest = false;
+      st.newestId = o.uuid || lines[i].length + ':' + i;
+      // Esc or "No" on a permission prompt: Claude stops without a Stop hook
+      if (o.type === 'user' && /Request interrupted by user/.test(JSON.stringify(o.message && o.message.content || ''))) st.interrupted = true;
+    }
+    if (o.type === 'user' && !gotActivity) {
+      // a tool result or the user's prompt comes after the last tool call: nothing specific running
+      gotActivity = true;
+      st.activity = '';
+    }
+    if (o.type !== 'assistant' || !o.message) continue;
+    const m = o.message;
+    const content = Array.isArray(m.content) ? m.content : [];
+    if (!gotActivity) {
+      gotActivity = true;
+      const tool = [...content].reverse().find(c => c.type === 'tool_use');
+      st.activity = tool ? describeTool(tool) : content.some(c => c.type === 'thinking') ? 'denkt nach' : 'schreibt';
+    }
+    if (!gotUsage && m.usage && m.model && m.model !== '<synthetic>') {
+      gotUsage = true;
+      const u = m.usage;
+      st.ctx = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0) + (u.output_tokens || 0);
+      st.model = m.model;
+    }
+    if (!gotText) {
+      const text = content.filter(c => c.type === 'text').map(c => c.text).join('\n').trim();
+      if (text) { gotText = true; st.lastText = text.slice(0, 600); }
+    }
+  }
+  return true;
+}
+
+function sendClaude(paneId, event, extra = {}) {
+  const st = claudeState(paneId);
+  const r = ptys.get(paneId);
+  const win = r ? r.win : null;
+  if (win && !win.isDestroyed()) win.webContents.send('claude:event', { paneId, event, state: publicClaudeState(st), ...extra });
+}
+
+function setClaudePolling(paneId, on) {
+  const st = claudeState(paneId);
+  if (on && !st.poll) {
+    st.poll = setInterval(() => {
+      if (!ptys.has(paneId)) { clearInterval(st.poll); st.poll = null; return; }
+      if (!readTranscript(st)) return;
+      // a new message after a permission prompt: it was answered
+      if (st.waiting && st.newestId !== st.waitingAt) st.waiting = null;
+      if (st.interrupted) {
+        st.busy = false; st.activity = '';
+        clearInterval(st.poll); st.poll = null;
+        sendClaude(paneId, 'Interrupted');
+      } else sendClaude(paneId, 'Update');
+    }, 1500);
+  } else if (!on && st.poll) { clearInterval(st.poll); st.poll = null; }
+}
+
+function onClaudeHook(paneId, event, d) {
+  if (!paneId) return;
+  const st = claudeState(paneId);
+  st.hooked = true;
+  if (d.transcript_path) { if (d.transcript_path !== st.transcript) st.mtime = 0; st.transcript = d.transcript_path; }
+  if (d.cwd) st.cwd = d.cwd;
+  let message = '';
+  switch (event) {
+    case 'SessionStart': st.active = true; st.busy = false; st.waiting = null; st.activity = ''; if (d.model) st.model = typeof d.model === 'string' ? d.model : (d.model.id || ''); break;
+    case 'UserPromptSubmit': st.active = true; st.busy = true; st.since = Date.now(); st.waiting = null; st.activity = 'denkt nach'; setClaudePolling(paneId, true); break;
+    case 'Stop':
+      st.busy = false; st.waiting = null; st.activity = '';
+      setClaudePolling(paneId, false);
+      st.mtime = 0;
+      readTranscript(st);
+      st.activity = '';
+      if (typeof d.last_assistant_message === 'string' && d.last_assistant_message.trim()) st.lastText = d.last_assistant_message.trim().slice(0, 600);
+      break;
+    case 'Notification':
+      message = d.message || '';
+      // "waiting for your input" comes 60 s after a reply: not worth a second alarm
+      st.waiting = /waiting for your input/i.test(message) ? null : (message || 'Claude braucht dich');
+      break;
+    case 'SessionEnd': st.active = false; st.busy = false; st.waiting = null; st.activity = ''; setClaudePolling(paneId, false); break;
+  }
+  if (event !== 'Stop') readTranscript(st);
+  if (event === 'Notification') st.waitingAt = st.newestId;
+  sendClaude(paneId, event, { message });
+}
+
+// slash commands for the input box: built-in ones plus the user's commands and skills
+function frontmatterDesc(file) {
+  try {
+    const head = fs.readFileSync(file, 'utf8').slice(0, 2000);
+    const m = /^---[\s\S]*?\ndescription:\s*(.+)/m.exec(head);
+    return m ? m[1].trim().replace(/^["']|["']$/g, '') : '';
+  } catch { return ''; }
+}
+function claudeCommands(cwd) {
+  const out = [];
+  const seen = new Set();
+  const add = (name, desc, kind) => { if (!seen.has(name)) { seen.add(name); out.push({ name, desc, kind }); } };
+  const roots = [path.join(os.homedir(), '.claude')];
+  if (cwd) roots.unshift(path.join(cwd, '.claude'));
+  for (const root of roots) {
+    const walk = (dir, prefix) => {
+      let entries = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (e.isDirectory()) walk(path.join(dir, e.name), prefix + e.name + ':');
+        else if (e.name.endsWith('.md')) add(prefix + e.name.slice(0, -3), frontmatterDesc(path.join(dir, e.name)), 'command');
+      }
+    };
+    walk(path.join(root, 'commands'), '');
+    let skills = [];
+    try { skills = fs.readdirSync(path.join(root, 'skills'), { withFileTypes: true }); } catch {}
+    for (const e of skills) {
+      const f = path.join(root, 'skills', e.name, 'SKILL.md');
+      if (e.isDirectory() && fs.existsSync(f)) add(e.name, frontmatterDesc(f), 'skill');
+    }
+  }
+  return out;
+}
+
 const uiPending = new Map(); // reqId -> resolve
 let uiSeq = 0;
 function askRenderer(win, payload, timeoutMs = 0) {
@@ -442,6 +656,7 @@ async function handleCli(msg) {
       return askRenderer(win, payload, msg.cmd === 'ask' ? (msg.timeout ? msg.timeout * 1000 + 500 : 0) : 15000);
     }
     case 'progress': return askRenderer(win, { type: 'progress', paneId, state: msg.state, value: msg.value }, 5000);
+    case 'claude-hook': onClaudeHook(paneId, String(msg.event || (msg.data && msg.data.hook_event_name) || ''), msg.data || {}); return { ok: true };
     case 'open': return openTarget(msg.target, cwd, { reveal: !!msg.reveal });
     case 'update': {
       const res = await runUpdate({ restart: !!msg.restart, pull: msg.pull !== false });
@@ -606,7 +821,17 @@ function createWindow(snapshot = null) {
       for (const [op, arg] of steps) {
         if (op === 'wait') await new Promise(r => setTimeout(r, arg));
         else if (op === 'type') { for (const ch of arg) { win.webContents.sendInputEvent({ type: 'keyDown', keyCode: ch }); win.webContents.sendInputEvent({ type: 'char', keyCode: ch }); win.webContents.sendInputEvent({ type: 'keyUp', keyCode: ch }); await new Promise(r => setTimeout(r, 120)); } }
-        else if (op === 'key') { win.webContents.sendInputEvent({ type: 'keyDown', keyCode: arg }); win.webContents.sendInputEvent({ type: 'keyUp', keyCode: arg }); await new Promise(r => setTimeout(r, 150)); }
+        else if (op === 'key') {
+          // "Shift+Tab", "Control+Enter", ...
+          const parts = String(arg).split('+');
+          const keyCode = parts.pop();
+          const modifiers = parts.map(m => m.toLowerCase());
+          win.webContents.sendInputEvent({ type: 'keyDown', keyCode, modifiers });
+          win.webContents.sendInputEvent({ type: 'keyUp', keyCode, modifiers });
+          await new Promise(r => setTimeout(r, 150));
+        }
+        else if (op === 'eval') { try { const v = await win.webContents.executeJavaScript(arg[0]); if (arg[1]) fs.writeFileSync(arg[1], typeof v === 'string' ? v : JSON.stringify(v, null, 2)); } catch (e) { console.error('eval failed', e); } }
+        else if (op === 'click') { const [x, y] = arg; for (const type of ['mouseDown', 'mouseUp']) win.webContents.sendInputEvent({ type, x, y, button: 'left', clickCount: 1 }); await new Promise(r => setTimeout(r, 150)); }
         else if (op === 'shot') { try { fs.writeFileSync(arg, (await win.webContents.capturePage()).toPNG()); } catch (e) { console.error('shot failed', e); } }
         else if (op === 'dump') fs.writeFileSync(arg, String(await win.webContents.executeJavaScript('window.__nekoDump ? window.__nekoDump() : ""')));
       }
@@ -688,6 +913,12 @@ app.whenReady().then(() => {
     fs.writeFileSync(p, img.toPNG());
     return p;
   });
+  ipcMain.handle('claude:state', (_e, paneId) => { const st = claudeStates.get(Number(paneId)); return st ? publicClaudeState(st) : null; });
+  ipcMain.handle('claude:commands', (_e, cwd) => claudeCommands(cwd ? String(cwd) : ''));
+  ipcMain.handle('dialog:open-files', async e => {
+    const r = await dialog.showOpenDialog(BrowserWindow.fromWebContents(e.sender), { properties: ['openFile', 'multiSelections'] });
+    return r.canceled ? [] : r.filePaths;
+  });
   ipcMain.handle('history:load', () => loadHistory());
   ipcMain.on('history:append', (_e, line) => appendHistory(line));
   ipcMain.handle('commands:get', () => getCommands());
@@ -704,6 +935,7 @@ app.whenReady().then(() => {
   ipcMain.on('window:new', () => createWindow());
   getCommands();
   installCli();
+  writeClaudeSettings();
   startPipeServer();
   // tabs saved by "neko update --restart"
   let restore = [];

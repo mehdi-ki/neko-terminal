@@ -9,6 +9,16 @@ window.NEKO_THEMES = {
     },
     ui: { bar: '#16161e', accent: '#7aa2f7', tabActiveBg: '#7aa2f7', tabActiveFg: '#16161e', tabBg: '#292e42', tabFg: '#737aa2', border: '#292e42', ghost: '#565f89', popupBg: '#1f2335', popupSel: '#2e3c64', muted: '#565f89', alert: '#f7768e' },
   },
+  // warm, calm dark theme used while Claude Code runs (config "claude_theme")
+  'Claude': {
+    term: {
+      background: '#262624', foreground: '#ece9e1', cursor: '#d97757', cursorAccent: '#262624',
+      selectionBackground: '#4a3f38', selectionForeground: '#f5f3ee',
+      black: '#1f1e1d', red: '#e27b6a', green: '#9fbf7f', yellow: '#e3b36b', blue: '#8fa9d6', magenta: '#c79bc8', cyan: '#86bfb4', white: '#d9d5cc',
+      brightBlack: '#77746c', brightRed: '#f09080', brightGreen: '#b3d494', brightYellow: '#f0c584', brightBlue: '#a6bde3', brightMagenta: '#d8b0d9', brightCyan: '#9dd3c8', brightWhite: '#faf9f5',
+    },
+    ui: { bar: '#1f1e1d', accent: '#d97757', tabActiveBg: '#d97757', tabActiveFg: '#1f1e1d', tabBg: '#30302e', tabFg: '#9c998f', border: '#3d3c38', ghost: '#6b6862', popupBg: '#30302e', popupSel: '#45433e', muted: '#8f8b82', alert: '#e5484d' },
+  },
   'Catppuccin Mocha': {
     term: {
       background: '#1e1e2e', foreground: '#cdd6f4', cursor: '#f5e0dc', cursorAccent: '#1e1e2e',

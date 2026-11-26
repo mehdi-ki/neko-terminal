@@ -47,6 +47,12 @@ contextBridge.exposeInMainWorld('neko', {
     update: opts => ipcRenderer.invoke('app:update', opts),
     info: () => ipcRenderer.invoke('app:info'),
   },
+  claude: {
+    onEvent: fn => { ipcRenderer.on('claude:event', (_e, ev) => fn(ev)); },
+    state: paneId => ipcRenderer.invoke('claude:state', paneId),
+    commands: cwd => ipcRenderer.invoke('claude:commands', cwd),
+  },
+  dialog: { openFiles: () => ipcRenderer.invoke('dialog:open-files') },
   open: (target, cwd, opts) => ipcRenderer.invoke('open:target', target, cwd, opts),
   statMany: (cwd, list) => ipcRenderer.invoke('fs:stat-many', cwd, list),
   loadImage: (src, cwd) => ipcRenderer.invoke('img:load', src, cwd),

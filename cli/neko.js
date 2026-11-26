@@ -137,6 +137,23 @@ async function main() {
       console.log(`Neko ${res.version} aus ${res.root}`);
       return;
     }
+    case 'hook': {
+      // called by Claude Code hooks (see claude-settings.json): must stay silent and never fail,
+      // stdout of some hooks is added to Claude's context
+      if (!process.env.NEKO_PIPE) return;
+      let data = {};
+      try {
+        const raw = process.stdin.isTTY ? '' : await Promise.race([readStdin(), new Promise(r => setTimeout(() => r(''), 1500))]);
+        data = JSON.parse(raw || '{}');
+      } catch {}
+      try {
+        await Promise.race([
+          request({ cmd: 'claude-hook', event: pos[0] || data.hook_event_name, data }),
+          new Promise(r => setTimeout(r, 2500)),
+        ]);
+      } catch {}
+      process.exit(0);
+    }
     case 'info': case 'ping': {
       const res = await request({ cmd: 'ping' });
       if (!res || res.error) fail(res);
@@ -150,4 +167,7 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error('neko: ' + (e && e.message || e)); process.exit(1); });
+main().catch(e => {
+  if (process.argv[2] === 'hook') process.exit(0);
+  console.error('neko: ' + (e && e.message || e)); process.exit(1);
+});
